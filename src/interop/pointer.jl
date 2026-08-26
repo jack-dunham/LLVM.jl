@@ -12,8 +12,8 @@ using Core: LLVMPtr
     @dispose ctx=Context() begin
         eltyp = convert(LLVMType, T)
 
-        # The index is converted to `Int64`, which must be at least as wide as the
-        # index width of every address space this is compiled for. 
+        # The index is converted to `Int`, which must be at least as wide as the
+        # index width of every address space this is compiled for.
         T_idx = convert(LLVMType, Int)
         T_ptr = convert(LLVMType, ptr)
 
@@ -52,8 +52,8 @@ end
     @dispose ctx=Context() begin
         eltyp = convert(LLVMType, T)
 
-        # The index is converted to `Int64`, which must be at least as wide as the
-        # index width of every address space this is compiled for. 
+        # The index is converted to `Int`, which must be at least as wide as the
+        # index width of every address space this is compiled for.
         T_idx = convert(LLVMType, Int)
         T_ptr = convert(LLVMType, ptr)
 
@@ -84,7 +84,7 @@ end
         end
 
         call_function(llvm_f, Cvoid, Tuple{LLVMPtr{T,A}, T, Int},
-		      :ptr, :(convert(T,x)), :(i % Int  - 1))
+                      :ptr, :(convert(T,x)), :(i % Int - 1))
     end
 end
 
