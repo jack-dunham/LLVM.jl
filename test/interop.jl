@@ -383,6 +383,11 @@ end
         @test !contains(ir, r"\b[sz]ext i\d+ .+ to i64")
     end
 
+    # like Base's `unsafe_load` for `Ptr`, indices that do not fit in `Int` are an error
+    # rather than silently wrapping around
+    @test_throws InexactError unsafe_load(ptr(0), typemax(UInt))
+    @test_throws InexactError unsafe_store!(ptr(0), Int8(0), typemax(UInt))
+
     # an index whose high bit is set after the -1 must still address forwards.
     # the pointer sits at the midpoint so a sign-extended offset stays in bounds.
     for I in (UInt8, UInt16)
