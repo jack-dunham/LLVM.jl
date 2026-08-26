@@ -88,7 +88,6 @@
             @test value_type(add) == LLVM.Int64Type()
         end
 
-        # exceptions from cloning callbacks are rethrown from clone_into!
         let new_f = LLVM.Function(mod, "type_mapper_error", fun_type)
             value_map = Dict{LLVM.Value, LLVM.Value}(
                 old_param => new_param for (old_param, new_param) in

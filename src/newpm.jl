@@ -144,6 +144,7 @@ end
 
 function module_callback(ref::API.LLVMModuleRef, thunk::Ptr{Cvoid})
     state = Base.unsafe_pointer_to_objref(thunk)::CustomPassState
+    state.exception === nothing || return true
     try
         mod = LLVM.Module(ref)
         return state.callback(mod)::Bool
@@ -157,6 +158,7 @@ end
 
 function function_callback(ref::API.LLVMValueRef, thunk::Ptr{Cvoid})
     state = Base.unsafe_pointer_to_objref(thunk)::CustomPassState
+    state.exception === nothing || return true
     try
         fun = LLVM.Function(ref)
         return state.callback(fun)::Bool

@@ -14,7 +14,7 @@ end
 function legacy_pass_callback(state::LegacyPassState, value)
     # A function pass can be invoked multiple times during a single run. Once
     # one invocation has failed, avoid running user code again while LLVM
-    # finishes unwinding its pass manager normally.
+    # finishes the pass-manager run.
     state.exception === nothing || return true
 
     try

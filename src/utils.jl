@@ -50,7 +50,9 @@ appends a suffix to all values cloned. The `type_mapper` and `materializer` func
 used to respectively map types and materialize values on demand.
 
 Exceptions thrown by either callback are captured and rethrown as a
-[`CallbackException`](@ref) after LLVM returns to Julia.
+[`CallbackException`](@ref) after LLVM returns to Julia. The destination
+function may already be partially modified when this happens and should be
+discarded.
 
 The `changes` argument determines how this function behaves; refer to the LLVM documentation
 of `CloneFunctionInto` for more details.

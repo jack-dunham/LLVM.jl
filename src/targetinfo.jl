@@ -191,6 +191,7 @@ end
 function custom_tti_is_noop_addr_space_cast_callback(from::Cuint, to::Cuint,
                                                      ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_noop_addr_space_cast(state.tti, UInt(from), UInt(to))::Bool
     catch err
@@ -202,6 +203,7 @@ end
 function custom_tti_is_valid_addr_space_cast_callback(from::Cuint, to::Cuint,
                                                       ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_valid_addr_space_cast(state.tti, UInt(from), UInt(to))::Bool
     catch err
@@ -213,6 +215,7 @@ end
 function custom_tti_addrspaces_may_alias_callback(as0::Cuint, as1::Cuint,
                                                   ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return true
     try
         return addrspaces_may_alias(state.tti, UInt(as0), UInt(as1))::Bool
     catch err
@@ -227,6 +230,7 @@ end
 function custom_tti_can_have_global_initializer_in_as_callback(as::Cuint,
                                                                ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return can_have_non_undef_global_initializer_in_address_space(
                    state.tti, UInt(as))::Bool
@@ -239,6 +243,7 @@ end
 function custom_tti_is_source_of_divergence_callback(ref::API.LLVMValueRef,
                                                      ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return true
     try
         return is_source_of_divergence(state.tti, Value(ref))::Bool
     catch err
@@ -253,6 +258,7 @@ end
 function custom_tti_is_always_uniform_callback(ref::API.LLVMValueRef,
                                                ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_always_uniform(state.tti, Value(ref))::Bool
     catch err
@@ -264,6 +270,7 @@ end
 function custom_tti_get_assumed_address_space_callback(ref::API.LLVMValueRef,
                                                        ud::Ptr{Cvoid})::Cuint
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return typemax(Cuint)
     try
         # `% Cuint` truncates modulo 2^32 rather than throwing on
         # `typemax(UInt)` — users naturally reach for that as the "no
@@ -281,6 +288,10 @@ function custom_tti_get_predicated_address_space_callback(
         out_predicate::Ptr{API.LLVMValueRef},
         ud::Ptr{Cvoid})::Cuint
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    if state.exception !== nothing
+        unsafe_store!(out_predicate, API.LLVMValueRef(C_NULL))
+        return typemax(Cuint)
+    end
     try
         (pred, as) = get_predicated_addr_space(state.tti, Value(ref))
         pred_ref = pred === nothing ? API.LLVMValueRef(C_NULL) :
@@ -298,6 +309,7 @@ function custom_tti_rewrite_intrinsic_with_as_callback(
         ii::API.LLVMValueRef, old::API.LLVMValueRef, new::API.LLVMValueRef,
         ud::Ptr{Cvoid})::API.LLVMValueRef
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return API.LLVMValueRef(C_NULL)
     try
         result = rewrite_intrinsic_with_address_space(state.tti,
                      Value(ii), Value(old), Value(new))
@@ -314,6 +326,10 @@ function custom_tti_collect_flat_address_operands_callback(
         max_count::Cuint, out_count::Ptr{Cuint},
         ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    if state.exception !== nothing
+        unsafe_store!(out_count, Cuint(0))
+        return false
+    end
     try
         ops = collect_flat_address_operands(state.tti, UInt(iid))::AbstractVector
         n = min(length(ops), Int(max_count))

@@ -1,9 +1,4 @@
 
-# Deliberately bypass the exception barrier used by NewPMCustomPass. This
-# models foreign pass integrations whose callbacks throw directly into LLVM.
-raw_throwing_module_pass(::LLVM.API.LLVMModuleRef, ::Ptr{Cvoid})::Bool =
-    error("exception thrown out of a raw pass callback")
-
 @testset "newpm" begin
 
 using LLVM.Interop
@@ -341,23 +336,31 @@ end
     end
 
     # Exceptions in TTI callbacks are caught and rethrown as PassException.
-    struct BoomTTI <: AbstractTargetTransformInfo end
+    struct BoomTTI <: AbstractTargetTransformInfo
+        calls::Base.RefValue{Int}
+    end
     LLVM.flat_address_space(::BoomTTI) = UInt(0)
-    LLVM.get_assumed_addr_space(::BoomTTI, ::LLVM.Value) = error("TTI callback boom")
+    function LLVM.get_assumed_addr_space(tti::BoomTTI, ::LLVM.Value)
+        tti.calls[] += 1
+        error("TTI callback boom")
+    end
 
     @dispose ctx=Context() mod=make_mod() begin
+        calls = Ref(0)
         @dispose pb=NewPMPassBuilder() begin
-            target_transform_info!(pb, BoomTTI())
+            target_transform_info!(pb, BoomTTI(calls))
             add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, InferAddressSpacesPass())
                 add!(fpm, InferAddressSpacesPass())
             end
             @test_throws LLVM.PassException run!(pb, mod)
         end
+        @test calls[] == 1
     end
 end
 
 @testset "custom pass exceptions" begin
-    # Test that exceptions in module passes are caught and rethrown
+    # Module pass exceptions are rethrown after LLVM returns.
     @dispose ctx=Context() mod=test_module() begin
         function throwing_pass!(mod::LLVM.Module)
             error("test error from pass")
@@ -371,13 +374,15 @@ end
             @test_throws LLVM.PassException run!(pb, mod)
         end
 
-        # Test that module is still valid after exception
+        # The module remains usable after the deferred exception.
         @test verify(mod) === nothing
     end
 
-    # Test function pass exception
+    # Do not invoke a failed callback again in the same pipeline.
     @dispose ctx=Context() mod=test_module() begin
+        attempts = 0
         function throwing_fn_pass!(f::LLVM.Function)
+            attempts += 1
             error("function pass error")
         end
 
@@ -386,13 +391,15 @@ end
             register!(pb, pass)
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, pass)
+                add!(fpm, pass)
             end
 
             @test_throws LLVM.PassException run!(pb, mod)
+            @test attempts == 1
         end
     end
 
-    # Test that exception message and backtrace are preserved
+    # Preserve the original exception and backtrace.
     @dispose ctx=Context() mod=test_module() begin
         function pass_with_message!(mod)
             throw(ArgumentError("specific error message"))
@@ -404,7 +411,7 @@ end
 
             try
                 run!(pb, mod)
-                @test false  # Should not reach here
+                @test false
             catch e
                 @test e isa LLVM.PassException
                 @test e.ex isa ArgumentError
@@ -414,7 +421,7 @@ end
         end
     end
 
-    # Test that a pass that succeeds before a throwing pass runs correctly
+    # Passes preceding the failure still run normally.
     @dispose ctx=Context() mod=test_module() begin
         success_count = 0
         function success_pass!(mod)
@@ -436,21 +443,12 @@ end
         end
     end
 
-    # A raw callback can longjmp past LLVM's C++ frames. LLVMExtra must keep
-    # StandardInstrumentations' globally-registered state alive in that case,
-    # so a later pass pipeline does not write through dangling stack storage.
-    @dispose ctx=Context() mod=test_module() begin
-        callback = @cfunction(raw_throwing_module_pass, Bool,
-                              (LLVM.API.LLVMModuleRef, Ptr{Cvoid}))
-        @dispose pb=NewPMPassBuilder() begin
-            LLVM.API.LLVMPassBuilderExtensionsRegisterModulePass(
-                pb.exts, "raw-throwing-pass", callback, C_NULL)
-            add!(pb, "raw-throwing-pass")
-            @test_throws ErrorException run!(pb, mod)
-        end
-
-        @test run!("no-op-module", mod) === nothing
-    end
+    # This deliberately violates the raw callback's no-throw contract. Run it
+    # in a child process so native state abandoned by longjmp cannot affect the
+    # rest of the test suite.
+    script = joinpath(@__DIR__, "raw_newpm_longjmp.jl")
+    project = dirname(@__DIR__)
+    @test success(`$(Base.julia_cmd()) --startup-file=no --project=$project $script`)
 end
 
 @testset "julia" begin

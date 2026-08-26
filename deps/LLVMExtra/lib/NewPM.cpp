@@ -617,8 +617,8 @@ static LLVMErrorRef runJuliaPasses(Module *Mod, Function *Fun, const char *Passe
 #endif
   // StandardInstrumentations may register members in process-global state.
   // Julia exceptions use longjmp and can therefore skip C++ destructors when
-  // they escape a pass callback. Keep SI off the stack so that exceptional
-  // unwinding leaks valid storage instead of leaving dangling global pointers.
+  // they escape a pass callback. Keep SI off the stack so that a non-local
+  // exit leaks valid storage instead of leaving dangling global pointers.
 #if LLVM_VERSION_MAJOR >= 17
   SI->registerCallbacks(PIC, &MAM);
 #else

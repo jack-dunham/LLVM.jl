@@ -252,7 +252,6 @@ end
         ts_mod = ThreadSafeModule("jit")
         sym = "SomeFunctionOLL"
 
-        # build the module
         ts_mod() do mod
             ft = LLVM.FunctionType(LLVM.VoidType())
             fn = LLVM.Function(mod, sym, ft)
@@ -366,7 +365,6 @@ end
             dispose(ism)
         end
     end
-
 end
 
 end
