@@ -92,6 +92,11 @@ run. The function should take a single argument, the module or function to be pr
 and return a boolean indicating whether the pass made any changes.
 
 Before using a custom pass, it must be registered with a pass builder using `register!`.
+LLVM.jl catches exceptions from these callbacks and rethrows them as `PassException`
+after control has returned from LLVM. Callbacks registered directly through the
+`LLVM.API.LLVMPassBuilderExtensionsRegister*Pass` APIs must provide an equivalent exception
+barrier: Julia exceptions must not escape a callback, because they bypass C++ destructors in
+LLVM's pass runner.
 
 See also: [`register!`](@ref)
 """
@@ -139,23 +144,29 @@ end
 
 function module_callback(ref::API.LLVMModuleRef, thunk::Ptr{Cvoid})
     state = Base.unsafe_pointer_to_objref(thunk)::CustomPassState
+    state.exception === nothing || return true
     try
         mod = LLVM.Module(ref)
         return state.callback(mod)::Bool
     catch err
-        state.exception = (err, Base.catch_backtrace())
-        return false
+        _capture_callback_exception!(state, err)
+        # The callback may have changed IR before throwing. Invalidate all
+        # analyses before surfacing the exception after LLVM returns.
+        return true
     end
 end
 
 function function_callback(ref::API.LLVMValueRef, thunk::Ptr{Cvoid})
     state = Base.unsafe_pointer_to_objref(thunk)::CustomPassState
+    state.exception === nothing || return true
     try
         fun = LLVM.Function(ref)
         return state.callback(fun)::Bool
     catch err
-        state.exception = (err, Base.catch_backtrace())
-        return false
+        _capture_callback_exception!(state, err)
+        # The callback may have changed IR before throwing. Invalidate all
+        # analyses before surfacing the exception after LLVM returns.
+        return true
     end
 end
 
@@ -335,6 +346,8 @@ function run!(pb::NewPMPassBuilder, target::Union{Module,Function}, tm::Union{No
     states = [CustomPassState(pass.callback) for pass in pb.custom_passes]
     tti_state = pb.custom_tti === nothing ? nothing :
                 install_custom_tti!(pb.exts, pb.custom_tti)
+    ctx = context(target)
+    prepare_diagnostic(ctx)
     GC.@preserve states tti_state aa_pipeline begin
         # register custom passes
         for (i,pass) in enumerate(pb.custom_passes)
@@ -382,6 +395,7 @@ function run!(pb::NewPMPassBuilder, target::Union{Module,Function}, tm::Union{No
             (err, bt) = tti_state.exception
             throw(PassException(err, bt))
         end
+        check_diagnostic(ctx)
     end
 end
 

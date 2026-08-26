@@ -37,6 +37,10 @@ Attach an instance with [`target_transform_info!`](@ref); attaching `nothing`
 reverts to LLVM's native TTI. When a `TargetMachine` is also supplied to
 [`run!`](@ref), a custom TTI takes precedence.
 
+Exceptions from overridden queries are captured, LLVM receives a conservative
+answer, and the exception is rethrown as a `PassException` after the pass
+pipeline returns.
+
 Overridable queries:
 
 - Target-level knobs: [`flat_address_space`](@ref),
@@ -184,20 +188,14 @@ end
 # `@cfunction`'d. They swallow exceptions and record them on the state —
 # LLVM must not see a Julia exception unwind into C.
 
-function capture_exception!(state::CustomTTIState, err)
-    # Keep the first caught exception; ignore subsequent ones from the same run.
-    if state.exception === nothing
-        state.exception = (err, Base.catch_backtrace())
-    end
-end
-
 function custom_tti_is_noop_addr_space_cast_callback(from::Cuint, to::Cuint,
                                                      ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_noop_addr_space_cast(state.tti, UInt(from), UInt(to))::Bool
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return false
     end
 end
@@ -205,10 +203,11 @@ end
 function custom_tti_is_valid_addr_space_cast_callback(from::Cuint, to::Cuint,
                                                       ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_valid_addr_space_cast(state.tti, UInt(from), UInt(to))::Bool
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return false
     end
 end
@@ -216,13 +215,14 @@ end
 function custom_tti_addrspaces_may_alias_callback(as0::Cuint, as1::Cuint,
                                                   ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return true
     try
         return addrspaces_may_alias(state.tti, UInt(as0), UInt(as1))::Bool
     catch err
         # Conservative default on exception: may alias. Matches LLVM's BaseT
         # and avoids the risk of incorrect optimization on partially-transformed
         # IR before the captured exception is re-raised.
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return true
     end
 end
@@ -230,11 +230,12 @@ end
 function custom_tti_can_have_global_initializer_in_as_callback(as::Cuint,
                                                                ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return can_have_non_undef_global_initializer_in_address_space(
                    state.tti, UInt(as))::Bool
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return false
     end
 end
@@ -242,21 +243,26 @@ end
 function custom_tti_is_source_of_divergence_callback(ref::API.LLVMValueRef,
                                                      ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return true
     try
         return is_source_of_divergence(state.tti, Value(ref))::Bool
     catch err
-        capture_exception!(state, err)
-        return false
+        _capture_callback_exception!(state, err)
+        # Treat the value as divergent until the pipeline returns and reports
+        # the callback failure. Assuming uniformity could enable an unsound
+        # transformation after the callback has already failed.
+        return true
     end
 end
 
 function custom_tti_is_always_uniform_callback(ref::API.LLVMValueRef,
                                                ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return false
     try
         return is_always_uniform(state.tti, Value(ref))::Bool
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return false
     end
 end
@@ -264,6 +270,7 @@ end
 function custom_tti_get_assumed_address_space_callback(ref::API.LLVMValueRef,
                                                        ud::Ptr{Cvoid})::Cuint
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return typemax(Cuint)
     try
         # `% Cuint` truncates modulo 2^32 rather than throwing on
         # `typemax(UInt)` — users naturally reach for that as the "no
@@ -271,7 +278,7 @@ function custom_tti_get_assumed_address_space_callback(ref::API.LLVMValueRef,
         # of ~0 to work.
         return get_assumed_addr_space(state.tti, Value(ref))::Integer % Cuint
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return typemax(Cuint)
     end
 end
@@ -281,6 +288,10 @@ function custom_tti_get_predicated_address_space_callback(
         out_predicate::Ptr{API.LLVMValueRef},
         ud::Ptr{Cvoid})::Cuint
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    if state.exception !== nothing
+        unsafe_store!(out_predicate, API.LLVMValueRef(C_NULL))
+        return typemax(Cuint)
+    end
     try
         (pred, as) = get_predicated_addr_space(state.tti, Value(ref))
         pred_ref = pred === nothing ? API.LLVMValueRef(C_NULL) :
@@ -288,7 +299,7 @@ function custom_tti_get_predicated_address_space_callback(
         unsafe_store!(out_predicate, pred_ref)
         return as::Integer % Cuint
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         unsafe_store!(out_predicate, API.LLVMValueRef(C_NULL))
         return typemax(Cuint)
     end
@@ -298,13 +309,14 @@ function custom_tti_rewrite_intrinsic_with_as_callback(
         ii::API.LLVMValueRef, old::API.LLVMValueRef, new::API.LLVMValueRef,
         ud::Ptr{Cvoid})::API.LLVMValueRef
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    state.exception === nothing || return API.LLVMValueRef(C_NULL)
     try
         result = rewrite_intrinsic_with_address_space(state.tti,
                      Value(ii), Value(old), Value(new))
         result === nothing && return API.LLVMValueRef(C_NULL)
         return Base.unsafe_convert(API.LLVMValueRef, result::Value)
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         return API.LLVMValueRef(C_NULL)
     end
 end
@@ -314,6 +326,10 @@ function custom_tti_collect_flat_address_operands_callback(
         max_count::Cuint, out_count::Ptr{Cuint},
         ud::Ptr{Cvoid})::API.LLVMBool
     state = Base.unsafe_pointer_to_objref(ud)::CustomTTIState
+    if state.exception !== nothing
+        unsafe_store!(out_count, Cuint(0))
+        return false
+    end
     try
         ops = collect_flat_address_operands(state.tti, UInt(iid))::AbstractVector
         n = min(length(ops), Int(max_count))
@@ -323,7 +339,7 @@ function custom_tti_collect_flat_address_operands_callback(
         unsafe_store!(out_count, Cuint(n))
         return n > 0
     catch err
-        capture_exception!(state, err)
+        _capture_callback_exception!(state, err)
         unsafe_store!(out_count, Cuint(0))
         return false
     end
